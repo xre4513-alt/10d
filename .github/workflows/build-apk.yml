@@ -35,6 +35,24 @@ jobs:
           mkdir -p app/src/main/java/com/akash/audio10d
           mkdir -p app/src/main/assets
           mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
+
+      - name: 🖼️ Copy Logo (from repo root)
+        run: |
+          if [ -f logo.png ]; then
+            cp logo.png app/src/main/res/drawable/logo.png
+            cp logo.png app/src/main/assets/logo.png
+            echo "✅ Custom logo.png found and copied"
+          else
+            cat > app/src/main/res/drawable/logo.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#7c3aed"/>
+              <corners android:radius="12dp"/>
+          </shape>
+          EOF
+            echo "⚠️ No logo.png found — using fallback"
+          fi
 
       - name: 📝 Write settings.gradle
         run: |
@@ -136,7 +154,7 @@ jobs:
 
               <application
                   android:allowBackup="true"
-                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:icon="@drawable/logo"
                   android:label="@string/app_name"
                   android:usesCleartextTraffic="true"
                   android:hardwareAccelerated="true"
@@ -184,13 +202,21 @@ jobs:
           cat > app/src/main/java/com/akash/audio10d/MainActivity.java << 'EOF'
           package com.akash.audio10d;
 
+          import android.Manifest;
           import android.annotation.SuppressLint;
+          import android.content.ContentUris;
           import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.database.Cursor;
           import android.net.Uri;
           import android.os.Build;
           import android.os.Bundle;
+          import android.provider.MediaStore;
+          import android.provider.Settings;
+          import android.util.Base64;
           import android.view.View;
           import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
           import android.webkit.PermissionRequest;
           import android.webkit.ValueCallback;
           import android.webkit.WebChromeClient;
@@ -200,14 +226,20 @@ jobs:
           import androidx.activity.result.ActivityResultLauncher;
           import androidx.activity.result.contract.ActivityResultContracts;
           import androidx.appcompat.app.AppCompatActivity;
+          import androidx.core.content.ContextCompat;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.io.ByteArrayOutputStream;
+          import java.io.InputStream;
 
           public class MainActivity extends AppCompatActivity {
 
               private WebView webView;
               private ValueCallback<Uri[]> filePathCallback;
               private ActivityResultLauncher<Intent> fileChooserLauncher;
+              private ActivityResultLauncher<String> permissionLauncher;
 
-              @SuppressLint("SetJavaScriptEnabled")
+              @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
@@ -221,6 +253,16 @@ jobs:
                       getWindow().setStatusBarColor(0xFF000000);
                       getWindow().setNavigationBarColor(0xFF000000);
                   }
+
+                  permissionLauncher = registerForActivityResult(
+                      new ActivityResultContracts.RequestPermission(),
+                      granted -> {
+                          webView.evaluateJavascript(
+                              granted
+                                  ? "window.onStoragePermissionGranted && window.onStoragePermissionGranted();"
+                                  : "window.onStoragePermissionDenied && window.onStoragePermissionDenied();",
+                              null);
+                      });
 
                   fileChooserLauncher = registerForActivityResult(
                       new ActivityResultContracts.StartActivityForResult(),
@@ -241,8 +283,7 @@ jobs:
                           }
                           filePathCallback.onReceiveValue(results);
                           filePathCallback = null;
-                      }
-                  );
+                      });
 
                   webView = new WebView(this);
                   setContentView(webView);
@@ -266,8 +307,9 @@ jobs:
                       s.setAllowUniversalAccessFromFileURLs(true);
                   }
 
-                  webView.setWebViewClient(new WebViewClient());
+                  webView.addJavascriptInterface(new WebAppBridge(), "AndroidBridge");
 
+                  webView.setWebViewClient(new WebViewClient());
                   webView.setWebChromeClient(new WebChromeClient() {
                       @Override
                       public void onPermissionRequest(final PermissionRequest request) {
@@ -281,16 +323,12 @@ jobs:
                               WebView webView,
                               ValueCallback<Uri[]> filePathCallback,
                               FileChooserParams fileChooserParams) {
-
                           if (MainActivity.this.filePathCallback != null) {
                               MainActivity.this.filePathCallback.onReceiveValue(null);
                           }
                           MainActivity.this.filePathCallback = filePathCallback;
-
                           Intent intent = fileChooserParams.createIntent();
                           intent.addCategory(Intent.CATEGORY_OPENABLE);
-                          intent.setType("audio/*");
-
                           try {
                               fileChooserLauncher.launch(intent);
                           } catch (Exception e) {
@@ -303,6 +341,115 @@ jobs:
 
                   webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
                   webView.loadUrl("file:///android_asset/index.html");
+              }
+
+              public class WebAppBridge {
+
+                  @JavascriptInterface
+                  public boolean hasStoragePermission() {
+                      String perm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                          ? Manifest.permission.READ_MEDIA_AUDIO
+                          : Manifest.permission.READ_EXTERNAL_STORAGE;
+                      return ContextCompat.checkSelfPermission(MainActivity.this, perm)
+                          == PackageManager.PERMISSION_GRANTED;
+                  }
+
+                  @JavascriptInterface
+                  public void requestStoragePermission() {
+                      runOnUiThread(() -> {
+                          String perm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                              ? Manifest.permission.READ_MEDIA_AUDIO
+                              : Manifest.permission.READ_EXTERNAL_STORAGE;
+                          permissionLauncher.launch(perm);
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void openAppSettings() {
+                      runOnUiThread(() -> {
+                          Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                          intent.setData(Uri.parse("package:" + getPackageName()));
+                          try { startActivity(intent); } catch (Exception e) { e.printStackTrace(); }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public String getAudioFiles() {
+                      JSONArray arr = new JSONArray();
+                      try {
+                          Uri collection;
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                              collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL);
+                          } else {
+                              collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+                          }
+
+                          String[] projection = {
+                              MediaStore.Audio.Media._ID,
+                              MediaStore.Audio.Media.TITLE,
+                              MediaStore.Audio.Media.DISPLAY_NAME,
+                              MediaStore.Audio.Media.DURATION,
+                              MediaStore.Audio.Media.SIZE,
+                              MediaStore.Audio.Media.ARTIST,
+                              MediaStore.Audio.Media.ALBUM
+                          };
+
+                          String selection = MediaStore.Audio.Media.IS_MUSIC + " != 0";
+                          String sortOrder = MediaStore.Audio.Media.TITLE + " ASC";
+
+                          Cursor cursor = getContentResolver().query(
+                              collection, projection, selection, null, sortOrder);
+
+                          if (cursor != null) {
+                              int idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID);
+                              int titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE);
+                              int nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME);
+                              int durCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION);
+                              int sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE);
+                              int artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST);
+                              int albumCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM);
+
+                              while (cursor.moveToNext()) {
+                                  long id = cursor.getLong(idCol);
+                                  Uri contentUri = ContentUris.withAppendedId(collection, id);
+
+                                  JSONObject obj = new JSONObject();
+                                  obj.put("id", id);
+                                  obj.put("uri", contentUri.toString());
+                                  obj.put("title", safeStr(cursor.getString(titleCol)));
+                                  obj.put("name", safeStr(cursor.getString(nameCol)));
+                                  obj.put("duration", cursor.getLong(durCol));
+                                  obj.put("size", cursor.getLong(sizeCol));
+                                  obj.put("artist", safeStr(cursor.getString(artistCol)));
+                                  obj.put("album", safeStr(cursor.getString(albumCol)));
+                                  arr.put(obj);
+                              }
+                              cursor.close();
+                          }
+                      } catch (Exception e) {
+                          e.printStackTrace();
+                      }
+                      return arr.toString();
+                  }
+
+                  @JavascriptInterface
+                  public String getAudioData(String uriStr) {
+                      try {
+                          Uri uri = Uri.parse(uriStr);
+                          InputStream is = getContentResolver().openInputStream(uri);
+                          if (is == null) return "";
+                          ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                          byte[] buf = new byte[16384];
+                          int n;
+                          while ((n = is.read(buf)) != -1) baos.write(buf, 0, n);
+                          is.close();
+                          return Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+                      } catch (Exception e) {
+                          return "";
+                      }
+                  }
+
+                  private String safeStr(String s) { return s == null ? "" : s; }
               }
 
               @Override
@@ -325,7 +472,7 @@ jobs:
           }
           EOF
 
-      - name: 📝 Write index.html (Full 10D App)
+      - name: 📝 Write index.html (Full 10D App + Custom Picker)
         run: |
           cat > app/src/main/assets/index.html << 'HTML_CONTENT_EOF'
           <!doctype html>
@@ -352,7 +499,8 @@ jobs:
           .logo-group{display:flex;align-items:center;gap:12px}
           .logo{width:46px;height:46px;border-radius:12px;
           background:linear-gradient(145deg,var(--accent),var(--accent-2));display:grid;place-items:center;
-          font-weight:800;font-size:19px;color:#fff;box-shadow:0 6px 22px var(--accent-glow)}
+          font-weight:800;font-size:19px;color:#fff;box-shadow:0 6px 22px var(--accent-glow);overflow:hidden}
+          .logo img{width:100%;height:100%;object-fit:cover;display:none}
           .title-group h1{margin:0;font-size:19px;font-weight:700}
           .title-group .sub{font-size:12.5px;color:var(--muted);margin-top:1px}
           .badge{font-size:12px;background:rgba(124,58,237,.18);padding:4px 14px;border-radius:40px;
@@ -377,12 +525,12 @@ jobs:
           box-shadow:0 0 14px var(--accent-glow);border:2px solid rgba(255,255,255,.1)}
           .val{min-width:44px;text-align:right;font-size:13px;color:var(--muted)}
           .file-wrap{position:relative;margin-bottom:8px}
-          .file-wrap input[type="file"]{width:100%;padding:10px 12px;
-          border:1.5px dashed rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.25);
-          color:var(--muted);font-size:13px;cursor:pointer}
-          .file-wrap input[type="file"]::file-selector-button{background:rgba(124,58,237,.2);
-          border:0;padding:6px 16px;border-radius:8px;color:#fff;font-weight:600;font-size:12px;
-          cursor:pointer;margin-right:12px}
+          .btn-browse{width:100%;padding:12px;border-radius:10px;
+          background:linear-gradient(145deg,rgba(124,58,237,.25),rgba(167,139,250,.15));
+          border:1.5px dashed rgba(124,58,237,.4);color:#fff;font-weight:600;font-size:13px;
+          cursor:pointer;transition:.2s;display:flex;align-items:center;justify-content:center;gap:8px}
+          .btn-browse:hover{background:linear-gradient(145deg,rgba(124,58,237,.35),rgba(167,139,250,.2));
+          border-color:rgba(124,58,237,.6)}
           .btn-group{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
           button{border:0;border-radius:10px;padding:9px 18px;font-weight:700;font-size:13px;
           cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:6px;
@@ -421,13 +569,78 @@ jobs:
           .tips{font-size:13px;color:var(--muted);line-height:1.6}
           .tips ul{margin:4px 0 0 0;padding-left:18px}
           .tips .highlight{color:var(--accent-2);font-weight:600}
+
+          /* ═══════════ AUDIO PICKER MODAL ═══════════ */
+          #pickerModal{position:fixed;inset:0;z-index:99999;display:none;
+          align-items:center;justify-content:center}
+          #pickerModal.show{display:flex}
+          .picker-overlay{position:absolute;inset:0;background:rgba(0,0,0,.8);
+          backdrop-filter:blur(8px)}
+          .picker-panel{position:relative;width:94%;max-width:580px;max-height:82vh;
+          background:linear-gradient(180deg,#0a1424,#061020);
+          border:1px solid rgba(255,255,255,.08);border-radius:16px;
+          display:flex;flex-direction:column;overflow:hidden;
+          box-shadow:0 20px 80px rgba(0,0,0,.9),inset 0 1px 0 rgba(255,255,255,.04);
+          animation:pickerIn .25s cubic-bezier(.34,1.56,.64,1)}
+          @keyframes pickerIn{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
+          .picker-top{display:flex;justify-content:space-between;align-items:center;
+          padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.05)}
+          .picker-title{font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px}
+          .picker-x{background:transparent;border:0;color:var(--muted);font-size:18px;
+          cursor:pointer;padding:4px 10px;border-radius:8px;transition:.2s}
+          .picker-x:hover{background:rgba(255,255,255,.06);color:#fff}
+          .picker-search-row{display:flex;gap:8px;padding:12px 16px;
+          border-bottom:1px solid rgba(255,255,255,.05)}
+          .picker-search-row input{flex:1;padding:11px 14px;border-radius:10px;
+          border:1px solid rgba(255,255,255,.06);background:rgba(0,0,0,.5);
+          color:#fff;font-size:13px;outline:none;font-family:var(--font);transition:.2s}
+          .picker-search-row input:focus{border-color:var(--accent);
+          box-shadow:0 0 0 3px rgba(124,58,237,.15)}
+          .picker-search-row input::placeholder{color:rgba(139,163,199,.5)}
+          .picker-search-row button{padding:10px 16px;font-size:13px;border-radius:10px}
+          .picker-list{flex:1;overflow-y:auto;padding:4px 0;min-height:200px}
+          .picker-list::-webkit-scrollbar{width:6px}
+          .picker-list::-webkit-scrollbar-thumb{background:rgba(124,58,237,.4);border-radius:10px}
+          .picker-list::-webkit-scrollbar-track{background:transparent}
+          .picker-item{display:flex;align-items:center;gap:12px;padding:11px 18px;
+          cursor:pointer;transition:.12s;border-bottom:1px solid rgba(255,255,255,.02)}
+          .picker-item:hover{background:rgba(124,58,237,.14)}
+          .picker-item:active{background:rgba(124,58,237,.28);transform:scale(.99)}
+          .picker-item-icon{width:42px;height:42px;border-radius:10px;
+          background:linear-gradient(145deg,var(--accent),var(--accent-2));
+          display:grid;place-items:center;font-size:18px;flex-shrink:0;
+          box-shadow:0 2px 10px rgba(124,58,237,.3)}
+          .picker-item-info{flex:1;min-width:0}
+          .picker-item-name{font-size:13.5px;font-weight:600;white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis;color:#fff}
+          .picker-item-meta{font-size:11.5px;color:var(--muted);white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis;margin-top:3px}
+          .picker-item-meta .dur{color:var(--accent-2);font-weight:600}
+          .picker-bottom{display:flex;justify-content:space-between;align-items:center;
+          padding:12px 18px;border-top:1px solid rgba(255,255,255,.05);
+          font-size:12px;color:var(--muted);gap:10px;flex-wrap:wrap}
+          .picker-link{background:transparent;border:0;color:var(--accent-2);cursor:pointer;
+          font-size:12px;font-weight:600;padding:4px 8px;border-radius:6px;transition:.2s}
+          .picker-link:hover{background:rgba(124,58,237,.15)}
+          .picker-empty{text-align:center;padding:60px 20px;color:var(--muted);font-size:13px}
+          .picker-empty .emoji{font-size:32px;display:block;margin-bottom:10px;opacity:.6}
+          @media(max-width:600px){
+              body{padding:8px}
+              .app{padding:14px 14px 10px}
+              .picker-panel{width:100%;max-width:100%;height:100%;max-height:100%;border-radius:0}
+              .main-grid{gap:12px}
+              #vis{height:200px}
+          }
           </style>
           </head>
           <body>
           <div class="app">
           <header>
             <div class="logo-group">
-              <div class="logo">10D</div>
+              <div class="logo">
+                <img id="logoImg" src="logo.png" alt="" style="display:none;width:100%;height:100%;object-fit:cover" />
+                <span id="logoText">10D</span>
+              </div>
               <div class="title-group">
                 <h1>10D Audio Studio</h1>
                 <div class="sub">Binaural · HRTF · High-Quality</div>
@@ -440,7 +653,8 @@ jobs:
               <div class="canvas-wrap"><canvas id="vis"></canvas></div>
               <div class="card" style="margin-top:12px">
                 <div class="file-wrap">
-                  <input id="file" type="file" accept="audio/*" />
+                  <input id="file" type="file" accept="audio/*" style="display:none" />
+                  <button id="openPickerBtn" class="btn-browse">📁 Select Audio File</button>
                 </div>
                 <div class="control-group">
                   <div class="control-row"><label>Speed</label>
@@ -489,8 +703,8 @@ jobs:
               <div class="tips">
                 <ul>
                   <li>Upload any audio file</li>
-                  <li><span class="highlight">Custom Mode</span> — manual position control</li>
-                  <li>Click on canvas to set position</li>
+                  <li><span class="highlight">Custom Mode</span> — manual position</li>
+                  <li>Click canvas to set position</li>
                   <li>Render exports <span class="highlight">320kbps MP3</span></li>
                   <li style="margin-top:8px;opacity:.6;">Made by AKASH · 10D v2</li>
                 </ul>
@@ -499,6 +713,29 @@ jobs:
           </div>
           <footer>© 10D Audio Tool — binaural spatial audio</footer>
           </div>
+
+          <!-- ═══════════ AUDIO PICKER MODAL ═══════════ -->
+          <div id="pickerModal">
+            <div class="picker-overlay" id="pickerOverlay"></div>
+            <div class="picker-panel">
+              <div class="picker-top">
+                <div class="picker-title">🎵 Select Audio</div>
+                <button class="picker-x" id="pickerClose">✕</button>
+              </div>
+              <div class="picker-search-row">
+                <input type="text" id="pickerSearch" placeholder="Search songs, artists, albums..." autocomplete="off" />
+                <button id="pickerSearchBtn" class="btn-primary">🔍</button>
+              </div>
+              <div class="picker-list" id="pickerList">
+                <div class="picker-empty"><span class="emoji">🎧</span>Scanning device...</div>
+              </div>
+              <div class="picker-bottom">
+                <span id="pickerCount">0 songs</span>
+                <button class="picker-link" id="pickerSystem">Use system picker →</button>
+              </div>
+            </div>
+          </div>
+
           <script>
           const $=id=>document.getElementById(id);
           const fileEl=$('file'),player=$('player'),statusEl=$('status');
@@ -508,7 +745,23 @@ jobs:
           const customToggle=$('customToggle'),customStatus=$('customStatus'),customControls=$('customControls');
           const azimuthEl=$('azimuth'),elevationEl=$('elevation'),distanceEl=$('distance');
           const azimuthVal=$('azimuthVal'),elevationVal=$('elevationVal'),distanceVal=$('distanceVal');
+          const pickerModal=$('pickerModal'),pickerList=$('pickerList'),pickerSearch=$('pickerSearch');
+          const pickerCount=$('pickerCount'),pickerSearchBtn=$('pickerSearchBtn');
+          const pickerClose=$('pickerClose'),pickerOverlay=$('pickerOverlay');
+          const openPickerBtn=$('openPickerBtn'),pickerSystem=$('pickerSystem');
+          const logoImg=$('logoImg'),logoText=$('logoText');
+
           let buffer=null,liveCtx=null,src=null,pan=null,anim=null,isCustom=false,isPlaying=false;
+
+          // Picker state
+          let allSongs=[];
+          let pickerScrollTop=0;
+          let pickerInitialized=false;
+
+          // Logo handling
+          logoImg.onload=function(){logoImg.style.display='block';logoText.style.display='none';};
+          logoImg.onerror=function(){logoImg.remove();};
+
           function status(s){statusEl.textContent='Status: '+s;}
           function updateVals(){
             speedVal.textContent=Number(speedEl.value).toFixed(2)+'×';
@@ -567,6 +820,42 @@ jobs:
           function updatePanFromCustom(){if(!pan)return;const p=getCustomPosition();
             if('positionX'in pan){pan.positionX.value=p.x;pan.positionY.value=p.y;pan.positionZ.value=p.z;}
             drawPosition(p,'#60a5fa');}
+
+          // ═══════════ LOAD FROM URI ═══════════
+          async function loadAudioFromUri(uri, displayName){
+            try{
+              status('Loading audio…');
+              let arrayBuffer;
+              // Try direct fetch first (fast path for content://)
+              try{
+                const resp=await fetch(uri);
+                if(resp.ok){arrayBuffer=await resp.arrayBuffer();}
+                else throw new Error('fetch status '+resp.status);
+              }catch(fe){
+                // Fallback: base64 from native
+                if(window.AndroidBridge){
+                  const b64=AndroidBridge.getAudioData(uri);
+                  if(!b64)throw new Error('Empty data');
+                  const bin=atob(b64);
+                  const bytes=new Uint8Array(bin.length);
+                  for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+                  arrayBuffer=bytes.buffer;
+                }else{
+                  throw fe;
+                }
+              }
+              const c=new (window.AudioContext||window.webkitAudioContext)({sampleRate:48000});
+              buffer=await c.decodeAudioData(arrayBuffer.slice(0));
+              await c.close();
+              const blob=new Blob([arrayBuffer],{type:'audio/mpeg'});
+              player.src=URL.createObjectURL(blob);
+              status('✅ Loaded: '+(displayName||'audio')+'  ·  '+buffer.duration.toFixed(1)+'s');
+            }catch(err){
+              status('Load error: '+err.message);
+            }
+          }
+
+          // ═══════════ FILE INPUT (system fallback) ═══════════
           fileEl.onchange=async e=>{
             const f=e.target.files[0];if(!f)return;status('Decoding …');
             try{const ab=await f.arrayBuffer();
@@ -576,6 +865,7 @@ jobs:
               status('Loaded: '+f.name+' | '+buffer.duration.toFixed(1)+'s');
             }catch(err){status('Decode error: '+err.message);}
           };
+
           function makeImpulse(c,dur=2.4,decay=2.8){const sr=c.sampleRate||48000;
             const len=Math.floor(sr*dur),buf=c.createBuffer(2,len,sr);
             for(let ch=0;ch<2;ch++){const data=buf.getChannelData(ch);
@@ -630,6 +920,7 @@ jobs:
           }
           $('previewBtn').onclick=startPreview;
           $('stopBtn').onclick=stopPreview;
+
           $('renderBtn').onclick=async()=>{
             if(!buffer){alert('Upload an audio file first.');return;}
             const btn=$('renderBtn');btn.disabled=true;status('🎛 Rendering high-quality …');
@@ -717,8 +1008,185 @@ jobs:
             const icon=ext==='mp3'?'🎵':'🎶';
             a.textContent=icon+' Download '+ext.toUpperCase()+' ('+(blob.size/1024).toFixed(0)+' KB)';
             downloadArea.appendChild(a);}
-          status('ready · upload audio');drawBG();
+
+          // ═══════════════════════════════════════════════════════
+          //            AUDIO PICKER (NEW FEATURE)
+          // ═══════════════════════════════════════════════════════
+
+          function formatDuration(ms){
+            if(!ms||ms<0)return'';
+            const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
+            return h>0?`${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
+                      :`${m}:${String(sec).padStart(2,'0')}`;
+          }
+          function escapeHtml(s){if(!s)return'';
+            return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);}
+          function getFileIcon(name){
+            if(!name)return'🎵';
+            const n=name.toLowerCase();
+            if(n.endsWith('.mp3'))return'🎵';
+            if(n.endsWith('.wav'))return'🎶';
+            if(n.endsWith('.ogg'))return'🎼';
+            if(n.endsWith('.m4a')||n.endsWith('.aac'))return'🎧';
+            if(n.endsWith('.flac'))return'💿';
+            return'🎵';
+          }
+          function formatSize(bytes){
+            if(!bytes)return'';
+            if(bytes>1024*1024)return(bytes/1024/1024).toFixed(1)+' MB';
+            return(bytes/1024).toFixed(0)+' KB';
+          }
+
+          function showPicker(){pickerModal.classList.add('show');}
+          function hidePicker(){
+            pickerScrollTop=pickerList.scrollTop;
+            pickerModal.classList.remove('show');
+          }
+
+          function renderPickerList(songs){
+            if(!songs.length){
+              pickerList.innerHTML='<div class="picker-empty"><span class="emoji">🔍</span>No audio files found</div>';
+              pickerCount.textContent='0 songs';return;
+            }
+            pickerCount.textContent=songs.length+' song'+(songs.length!==1?'s':'');
+            const frag=document.createDocumentFragment();
+            songs.forEach(song=>{
+              const el=document.createElement('div');
+              el.className='picker-item';
+              el.dataset.id=song.id;
+              el.dataset.uri=song.uri;
+              const dur=formatDuration(song.duration);
+              const size=song.size?formatSize(song.size):'';
+              const meta=[song.artist,song.album,dur,size].filter(Boolean).join(' · ');
+              el.innerHTML=`
+                <div class="picker-item-icon">${getFileIcon(song.name)}</div>
+                <div class="picker-item-info">
+                  <div class="picker-item-name">${escapeHtml(song.title||song.name)}</div>
+                  <div class="picker-item-meta">${escapeHtml(meta)}</div>
+                </div>`;
+              el.addEventListener('click',()=>onSongClick(song));
+              frag.appendChild(el);
+            });
+            pickerList.innerHTML='';
+            pickerList.appendChild(frag);
+          }
+
+          function onSongClick(song){
+            hidePicker();
+            // Give animation time to complete before starting load
+            setTimeout(()=>{
+              loadAudioFromUri(song.uri,song.title||song.name);
+            },250);
+          }
+
+          // ── Fuzzy search ──
+          function fuzzyScore(needle,hay){
+            needle=needle.toLowerCase();hay=hay.toLowerCase();
+            if(!needle)return 0;
+            if(hay.includes(needle)){
+              const idx=hay.indexOf(needle);
+              return 1000-idx*0.5+(hay.length<50?100:0);
+            }
+            // subsequence fuzzy
+            let qi=0,streak=0,bestStreak=0;
+            for(let i=0;i<hay.length&&qi<needle.length;i++){
+              if(hay[i]===needle[qi]){qi++;streak++;if(streak>bestStreak)bestStreak=streak;}
+              else{streak=0;}
+            }
+            return qi===needle.length?bestStreak*15:0;
+          }
+
+          function performSearch(){
+            const q=pickerSearch.value.trim();
+            if(!q){renderPickerList(allSongs);pickerList.scrollTop=0;return;}
+            const scored=[];
+            for(const song of allSongs){
+              const hay=(song.title||'')+' '+(song.name||'')+' '+(song.artist||'')+' '+(song.album||'');
+              const s=fuzzyScore(q,hay);
+              if(s>0)scored.push({song,score:s});
+            }
+            scored.sort((a,b)=>b.score-a.score);
+            renderPickerList(scored.map(x=>x.song));
+            pickerList.scrollTop=0;
+          }
+
+          // ── Permission handlers ──
+          window.onStoragePermissionGranted=function(){
+            status('✅ Permission granted — scanning…');
+            scanAndShowPicker();
+          };
+          window.onStoragePermissionDenied=function(){
+            status('⚠️ Permission denied');
+            if(confirm('Storage permission is required to browse audio files.\nOpen settings to grant it?')){
+              if(window.AndroidBridge&&AndroidBridge.openAppSettings)AndroidBridge.openAppSettings();
+            }
+          };
+
+          async function scanAndShowPicker(){
+            if(!window.AndroidBridge){
+              // No native bridge — use system picker
+              fileEl.click();
+              return;
+            }
+            status('Scanning device for audio files…');
+            pickerList.innerHTML='<div class="picker-empty"><span class="emoji">⏳</span>Scanning…</div>';
+            pickerCount.textContent='0 songs';
+            showPicker();
+            // Defer heavy scan to next tick so modal animates first
+            setTimeout(()=>{
+              try{
+                const json=AndroidBridge.getAudioFiles();
+                allSongs=JSON.parse(json)||[];
+              }catch(e){allSongs=[];console.error(e);}
+              renderPickerList(allSongs);
+              // Restore cached scroll position
+              requestAnimationFrame(()=>{
+                pickerList.scrollTop=pickerScrollTop;
+              });
+              status('Found '+allSongs.length+' audio file'+(allSongs.length!==1?'s':''));
+            },50);
+          }
+
+          async function openPicker(){
+            if(!window.AndroidBridge){
+              // Web browser fallback
+              fileEl.click();
+              return;
+            }
+            if(!AndroidBridge.hasStoragePermission()){
+              status('Requesting storage permission…');
+              AndroidBridge.requestStoragePermission();
+              return;
+            }
+            await scanAndShowPicker();
+          }
+
+          // ── Event bindings ──
+          openPickerBtn.addEventListener('click',openPicker);
+          pickerClose.addEventListener('click',hidePicker);
+          pickerOverlay.addEventListener('click',hidePicker);
+          pickerSearchBtn.addEventListener('click',performSearch);
+          pickerSearch.addEventListener('input',()=>{
+            // Live search with debounce
+            clearTimeout(pickerSearch._t);
+            pickerSearch._t=setTimeout(performSearch,180);
+          });
+          pickerSearch.addEventListener('keydown',e=>{
+            if(e.key==='Enter'){e.preventDefault();performSearch();}
+          });
+          pickerSystem.addEventListener('click',()=>{
+            hidePicker();
+            setTimeout(()=>fileEl.click(),200);
+          });
+          document.addEventListener('keydown',e=>{
+            if(e.key==='Escape'&&pickerModal.classList.contains('show'))hidePicker();
+          });
+
+          // ═══════════════════════════════════════════════════════
+          status('ready · tap "Select Audio File"');
+          drawBG();
           drawDot({x:0,y:0,z:0.8},'rgba(167,139,250,.3)');
+          console.log('🎧 10D Audio Studio loaded — Made by AKASH');
           </script>
           </body>
           </html>
