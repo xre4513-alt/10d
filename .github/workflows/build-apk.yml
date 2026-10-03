@@ -19,8 +19,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      # ──────────── YAHAN FIX HAI ────────────
       - name: 🤖 Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+      # ────────────────────────────────────────
 
       - name: ⚙️ Setup Gradle 8.5
         uses: gradle/actions/setup-gradle@v3
